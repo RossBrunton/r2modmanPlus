@@ -60,15 +60,15 @@ export default class SteamGameRunner_Linux extends GameRunnerProvider {
         if (args instanceof R2Error) {
             return args
         }
-        return this.start(game, args, proxyArgs);
+        return this.start(game, args, proxyArgs, profile.getProfilePath());
     }
 
     public async startVanilla(game: Game, profile: Profile): Promise<void | R2Error> {
         const instructions = await GameInstructions.getInstructionsForGame(game, profile);
-        return this.start(game, instructions.vanillaParameterList, {});
+        return this.start(game, instructions.vanillaParameterList, {}, null);
     }
 
-    async start(game: Game, args: string[], proxyArgs: Record<string, string>): Promise<void | R2Error> {
+    async start(game: Game, args: string[], proxyArgs: Record<string, string>, profiledir: string | null): Promise<void | R2Error> {
 
         const env = await InteractionProvider.instance.getEnvironmentVariables();
         if (env.STEAM_RUNTIME) { proxyArgs['STEAM_RUNTIME'] = `${env.STEAM_RUNTIME}` }
@@ -80,6 +80,28 @@ export default class SteamGameRunner_Linux extends GameRunnerProvider {
         if (steamDir instanceof R2Error) {
             return steamDir;
         }
+        let steamRunningInFlatpak = settings.getContext().global.linuxUseFlatpak;
+        if (steamRunningInFlatpak === null) {
+            // Assume that if the path contains the flatpak directory we must want to use flatpak
+            steamRunningInFlatpak = steamDir.includes("/com.valvesoftware.Steam/");
+        }
+
+        if (steamRunningInFlatpak && profiledir) {
+            // Ensure we have permission to read our config dir
+            let visible = true;
+            const check_cmd = `flatpak run --command='sh' com.valvesoftware.Steam -c 'ls "${profiledir}"'`;
+            await childProcess.exec(check_cmd, undefined, (err: Error) => {
+                if (err) {
+                    visible = false;
+                }
+            });
+            if (!visible) {
+                throw new R2Error('Flatpak Permissions Error',
+                    `The directory "${profiledir}" is not visible from within the Flatpak container`,
+                    '`flatpak override com.valvesoftware.Steam --user --filesystem="${XDG_CONFIG_HOME:-$HOME/.config}/r2modmanPlus-local"` to grant access, then restart Steam.');
+            }
+        }
+
         const steamExecutable = `${steamDir}/steam.sh`;
 
         LoggerProvider.instance.Log(LogSeverity.INFO, `Steam executable to call is: ${steamExecutable}`);
@@ -132,6 +154,15 @@ export default class SteamGameRunner_Linux extends GameRunnerProvider {
 
                 LoggerProvider.instance.Log(LogSeverity.INFO, `User on regular Flatpak environment`);
                 childProcess.execSync(`xdg-open steam://run/${game.activePlatform.storeIdentifier}/`);
+            } else if (steamRunningInFlatpak ) {
+                console.log("Launching flatpak'd steam", commandString)
+                childProcess.execSync(
+                    `flatpak run com.valvesoftware.Steam ${commandString}`,
+                    {
+                        env: env,
+                        stdio: 'inherit'
+                    }
+                );
             } else {
                 LoggerProvider.instance.Log(LogSeverity.INFO, `Launching using Native behaviour`);
                 childProcess.execSync(
